@@ -1,13 +1,14 @@
-﻿using System;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
 
 class ClipboardTest
 {
 	private const int WM_CLIPBOARDUPDATE = 0x031D;
-	private static IntPtr HWND_MESSAGE = new IntPtr(-3);
+	private const int WM_DRAWCLIPBOARD = 0x0308;
+	private const int WM_CHANGECBCHAIN = 0x030D;
+
 	private static IntPtr hWndGlobal;
+	private static IntPtr nextClipboardViewer;
 
 	private delegate IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
@@ -45,6 +46,15 @@ class ClipboardTest
 
 	[DllImport("user32.dll", SetLastError = true)]
 	private static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+
+	[DllImport("user32.dll")]
+	private static extern IntPtr SetClipboardViewer(IntPtr hWndNewViewer);
+
+	[DllImport("user32.dll")]
+	private static extern bool ChangeClipboardChain(IntPtr hWndRemove, IntPtr hWndNewNext);
+
+	[DllImport("user32.dll")]
+	private static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
 
 	[DllImport("user32.dll", SetLastError = true)]
 	private static extern IntPtr DefWindowProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -108,23 +118,26 @@ class ClipboardTest
 		hWndGlobal = CreateWindowEx(0, className, "Hidden Clipboard Listener", 0,
 			0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
 
-		AddClipboardFormatListener(hWndGlobal);
-
 		new Thread(() =>
 		{
-			Console.WriteLine("Type \"exit\" at any time to exit:");
 			while (true)
 			{
 				string? input = Console.ReadLine()?.Trim()?.ToLower();
 				if (input == "exit")
 				{
-					Console.WriteLine("Removing clipboard listener...");
+					Console.WriteLine("Removing clipboard listeners...");
 					RemoveClipboardFormatListener(hWndGlobal);
+					ChangeClipboardChain(hWndGlobal, nextClipboardViewer);
 					Console.WriteLine("Exiting program.");
 					Environment.Exit(0);
 				}
 			}
 		}).Start();
+
+		Console.WriteLine("Type \"exit\" at any time to exit:");
+		
+		AddClipboardFormatListener(hWndGlobal);
+		nextClipboardViewer = SetClipboardViewer(hWndGlobal);
 
 		MSG msg;
 		while (GetMessage(out msg, hWndGlobal, 0, 0))
@@ -139,15 +152,26 @@ class ClipboardTest
 		switch (msg)
 		{
 			case WM_CLIPBOARDUPDATE:
-				Console.WriteLine("WM_CLIPBOARDUPDATE");
+			case WM_DRAWCLIPBOARD:
+				Console.WriteLine(msg == WM_CLIPBOARDUPDATE ? "WM_CLIPBOARDUPDATE" : "WM_DRAWCLIPBOARD");
 				IntPtr owner = GetClipboardOwner();
 				Console.WriteLine($"\tOwner HWND: {owner}");
-
 				GetWindowThreadProcessId(owner, out int pid);
 				string processName = GetProcessImageFileName(pid);
 				Console.WriteLine($"\tOwner Proc: {processName}");
+
+				if (msg == WM_DRAWCLIPBOARD && nextClipboardViewer != IntPtr.Zero)
+					SendMessage(nextClipboardViewer, WM_DRAWCLIPBOARD, hWnd, IntPtr.Zero);
+				break;
+
+			case WM_CHANGECBCHAIN:
+				if (wParam == nextClipboardViewer)
+					nextClipboardViewer = lParam;
+				else if (nextClipboardViewer != IntPtr.Zero)
+					SendMessage(nextClipboardViewer, (int)msg, wParam, lParam);
 				break;
 		}
+
 		return DefWindowProc(hWnd, msg, wParam, lParam);
 	}
 
@@ -160,7 +184,6 @@ class ClipboardTest
 		StringBuilder buffer = new StringBuilder(1024);
 		GetProcessImageFileName(hProcess, buffer, buffer.Capacity);
 		CloseHandle(hProcess);
-
 		return buffer.ToString();
 	}
 }
